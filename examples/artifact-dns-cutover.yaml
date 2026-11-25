@@ -1,0 +1,102 @@
+# Sanitised example. Times are relative to the DNS change.
+title: Artifact downloads failing after a DNS cut-over
+date: "Relative timeline (T+0 = GeoDNS change applied)"
+severity: SEV2
+status: resolved
+authors: [Platform SRE]
+
+summary: >
+  A GeoDNS change pointed artifacts.example.com at a new repository site. Clusters in
+  one region then could not pull artifacts: pulls hung. Replication to the new site
+  was incomplete, so many versions did not exist there. The DNS change was rolled
+  back and pulls recovered, but the next day jobs failed again because the rollback
+  had not restored the original state: not all repositories were configured in
+  federated mode. The owning team fixed this within about an hour of coming on duty.
+
+impact: >
+  Build and deployment jobs in the affected region that needed artifacts from the
+  repository hung or failed, first after the DNS change and again the following day.
+  Other regions were not affected.
+
+detection: >
+  Teams in the affected region reported pipelines hanging while downloading
+  artifacts. There was no alert on artifact pull failures or latency.
+
+timeline:
+  - at: "T+0"
+    kind: start
+    event: GeoDNS updated so artifacts.example.com resolves to the new site for one region.
+  - at: "T+40m"
+    kind: detected
+    event: Pipelines in the region report artifact pulls hanging.
+  - at: "T+1h"
+    event: Network path between the clusters and the new site investigated first; nothing wrong found there.
+  - at: "T+1h 45m"
+    event: >
+      Comparing the two sites shows the new site only has versions up to v5, while the
+      original site has up to v10: replication to the new site is incomplete.
+  - at: "T+2h"
+    event: >
+      Decision to roll back the DNS change. The rollback procedure did not cover the
+      new site and had to be adjusted before it could be applied.
+  - at: "T+2h 30m"
+    kind: mitigated
+    event: DNS rolled back to the original site; artifact pulls verified from the region.
+  - at: "T+1d"
+    event: >
+      Jobs fail again. The rollback had not restored the original state: not all
+      repositories were configured in federated mode.
+  - at: "T+1d 1h"
+    event: Owning team for the repository platform comes on duty and starts the fix.
+  - at: "T+1d 2h"
+    kind: resolved
+    event: Federated mode configured for the remaining repositories; jobs succeed again.
+
+root_cause: >
+  The cut-over was made before replication to the new site was complete, so requests
+  routed there asked for versions that did not exist and the pulls hung. The rollback
+  procedure had not been tested against the new topology: it needed manual changes
+  during the incident, and it did not return every repository to its original
+  federated configuration, which caused the second failure the next day.
+
+what_went_well:
+  - Comparing the two sites side by side found the version gap quickly once network checks came back clean.
+  - The DNS rollback restored pulls the same day.
+  - Once the owning team was on duty, the second failure was fixed within about an hour.
+
+what_went_wrong:
+  - No check that replication was complete before changing DNS.
+  - The rollback procedure was untested and did not include the new site.
+  - The rollback left some repositories outside federated mode, which only surfaced the next day.
+  - The team that owns the repository platform was not on duty in the affected time zone.
+  - The first hypothesis (network) was checked before the cheaper "is the content there?" question.
+
+action_items:
+  - action: >
+      Add a pre-cut-over gate that compares repository contents (latest version per
+      repository) between sites and blocks the DNS change on any difference.
+    owner: Repository platform team
+    due: Sprint +1
+    status: open
+  - action: >
+      Rewrite the DNS rollback procedure to cover both sites and the federated
+      configuration of every repository, and rehearse it in a test environment.
+    owner: Platform SRE
+    due: Sprint +2
+    status: open
+  - action: Alert on artifact pull latency and failures per region.
+    owner: Observability team
+    due: Sprint +1
+    status: open
+  - action: >
+      Schedule infrastructure cut-overs only when the owning team has someone on duty
+      in every affected time zone, or arrange cover in advance.
+    owner: Change management
+    due: Sprint +1
+    status: done
+
+lessons:
+  - Verify replication completeness before any cut-over.
+  - Test the rollback procedure itself; an untested rollback is a second change, not a safety net.
+  - After a rollback, verify the full original state, not only that the symptom went away.
+  - Make sure an owner is on duty across time zones for changes that affect other regions.

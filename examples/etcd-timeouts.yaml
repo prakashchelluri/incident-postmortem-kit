@@ -1,0 +1,104 @@
+# Sanitised example. Times are relative to the first observed timeouts.
+title: etcd timeouts on Dev and QA Kubernetes clusters
+date: "Relative timeline (T+0 = first timeouts observed)"
+severity: SEV3 (non-production)
+status: mitigated, monitoring
+authors: [Platform SRE]
+
+summary: >
+  The Dev and QA Kubernetes clusters showed frequent etcd timeouts, which made the
+  API server slow or unavailable for short periods. The underlying storage could
+  not provide the I/O that etcd needs. Moving etcd to SSD helped but was not enough,
+  so fsync was disabled for etcd in Dev and QA only, and container logs were moved
+  off the node disks into a compressed RAM area. Production was not affected and
+  keeps fsync enabled.
+
+impact: >
+  Engineers and CI pipelines using the Dev and QA clusters saw intermittent API
+  timeouts: kubectl commands hung or failed, and deployments to these environments
+  had to be retried. No production cluster was involved.
+
+detection: >
+  Reported by teams whose deployments to Dev and QA were timing out. etcd logs on the
+  control plane nodes showed slow request and timeout warnings, which pointed the
+  investigation at etcd rather than at the API server itself.
+
+timeline:
+  - at: "T+0"
+    kind: start
+    event: Intermittent API timeouts begin on the Dev and QA clusters.
+  - at: "T+2h"
+    kind: detected
+    event: Teams report failing deployments; etcd logs show slow requests and timeouts.
+  - at: "T+1d"
+    event: >
+      Investigation finds etcd disk writes are limited by the storage IOPS available
+      to the control plane nodes (etcd data on HDD).
+  - at: "T+3d"
+    event: etcd data moved from HDD to SSD. Timeouts become less frequent but continue.
+  - at: "T+4d"
+    event: >
+      Measurements show the hardware still cannot provide enough I/O for etcd's
+      synchronous (fsync) writes under normal cluster load.
+  - at: "T+5d"
+    kind: mitigated
+    event: >
+      fsync disabled for etcd on Dev and QA only, as a documented exception for
+      non-production. etcd timeouts stop being reported.
+  - at: "T+8d"
+    event: >
+      Container log writes identified as an additional source of node disk I/O.
+      Container logs moved to a 1 GB ZRAM-backed compressed RAM area with log rotation.
+  - at: "T+9d"
+    event: Lower log-write disk I/O and lower observed I/O pressure on the nodes.
+
+root_cause: >
+  etcd persists every write to its write-ahead log and calls fsync before
+  acknowledging it, so its latency follows disk latency. The storage behind the Dev
+  and QA control plane nodes could not deliver the IOPS and latency etcd needs: first
+  on HDD, and still not enough after moving to SSD. Container logs written to the
+  same node disks added more I/O and made the contention worse. There was no
+  pre-provisioning check of etcd's disk requirements for these environments.
+
+what_went_well:
+  - etcd logs pointed quickly at disk latency rather than at the API server.
+  - Changes were made one at a time (SSD, then fsync, then logs), so the effect of each was visible.
+  - The fsync change was limited to Dev and QA and recorded as a non-production exception.
+
+what_went_wrong:
+  - Dev and QA control planes ran on storage that had never been checked against etcd's disk requirements.
+  - The SSD move alone did not solve the problem, which cost several days.
+  - There was no alert on etcd disk latency; users noticed before monitoring did.
+
+action_items:
+  - action: >
+      Provision control plane storage for Dev and QA that meets etcd's disk latency
+      guidance, then re-enable fsync there.
+    owner: Platform SRE
+    due: Next quarter
+    status: open
+  - action: Alert on etcd WAL fsync and backend commit latency (p99) for every cluster.
+    owner: Observability team
+    due: Sprint +1
+    status: open
+  - action: >
+      Add a config check that blocks the fsync-disabled etcd setting on any
+      production cluster.
+    owner: Platform SRE
+    due: Sprint +1
+    status: open
+  - action: >
+      Document the ZRAM log area (1 GB, rotation settings) and that logs held there
+      are lost on node reboot.
+    owner: Platform SRE
+    due: Sprint +1
+    status: done
+
+lessons:
+  - >
+    Disabling fsync trades durability for speed: etcd can acknowledge writes that are
+    not yet on disk, so a crash can lose or corrupt data. That is acceptable only for
+    environments that can be rebuilt, never for production.
+  - Check etcd's disk requirements before building a cluster, not after it is slow.
+  - Look at everything else writing to the same disk (logs, images) when a latency-sensitive service is slow.
+  - The mitigations reduced I/O pressure; they did not make the hardware sufficient. The real fix is better storage.
